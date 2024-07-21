@@ -182,6 +182,7 @@ def run(
     else:
         dataset = LoadImages(source, img_size=imgsz, stride=stride, auto=pt, vid_stride=vid_stride)
     vid_path, vid_writer = [None] * bs, [None] * bs
+    print(f"batch size is {bs}")
 
     # Run inference
     model.warmup(imgsz=(1 if pt or model.triton else bs, 3, *imgsz))  # warmup

@@ -5,14 +5,21 @@ import numpy as np
 import math
   
 # 需要标定, realsense L515 RGB 1080 * 1920  
-LIMBUS_R_MM = 6  
-FOCAL_LEN_X_PX = 1352.7  # 4 param in slam book
-FOCAL_LEN_Y_PX = 1360.6  
+# LIMBUS_R_MM = 6  
+# FOCAL_LEN_X_PX = 1352.7  # 4 param in slam book
+# FOCAL_LEN_Y_PX = 1360.6  
+# FOCAL_LEN_Z_PX = (FOCAL_LEN_X_PX + FOCAL_LEN_Y_PX) / 2  
+# PRIN_POINT = np.array([979.5840, 552.1356], dtype=np.float64)  
+
+# rs-sense-control 获取 realsense L515 BGR8 640 x 480
+LIMBUS_R_MM = 6 # 上次量的多少来着？ 
+FOCAL_LEN_X_PX = 596.061
+FOCAL_LEN_Y_PX = 596.014 
 FOCAL_LEN_Z_PX = (FOCAL_LEN_X_PX + FOCAL_LEN_Y_PX) / 2  
-PRIN_POINT = np.array([979.5840, 552.1356], dtype=np.float64)  
+PRIN_POINT = np.array([331.297, 244.254], dtype=np.float64) 
 
 # for filtering the estimated pos
-NFILTER = 3 # a batch -> how many point used to estimate one point
+NFILTER = 1 # a batch -> how many point used to estimate one point; set to 1 so no filtering
 posBuf = []
 dirBuf = []
 counter = 0

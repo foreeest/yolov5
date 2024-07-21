@@ -1,5 +1,16 @@
 # EyePose开发 #
 
+## 重要代码 ##
+
+code | desciption
+---- | --------
+detect.py | 原版推理代码
+realsense detect.py | 原版 + 自注释
+realsense ellipse.py| YOLO + ellipse Pose Estimation
+realsense geometry.py| 给ellipse服务的几何计算模块
+./utils/dataloader.py| source 参数为666时使用realsense
+
+
 ## 运行方法 ##
 
 ### realsense ###
@@ -9,6 +20,13 @@
 ```shell
 $ python realsense_detect.py --source 666 --weight runs/train/exp3/weights/best.pt --conf 0.7
 ```
+
+yolo + ellipse 版，只识别一个，但感觉不如不用这个参数，另外再修改  
+```shell
+$ python realsense_ellipse.py --source 666 --weight runs/train/exp3/weights/best.pt --conf 0.7 --max-det 1
+```
+
+目前调整分辨率须修改dataloader，同时要改geometry来换内参  
 
 ### 内窥镜 ###
 

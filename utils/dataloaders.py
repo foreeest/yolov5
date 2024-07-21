@@ -483,8 +483,10 @@ class LoadStreams:
 
                 # config.enable_stream(rs.stream.depth, 640, 480, rs.format.z16, 30)
                 # config.enable_stream(rs.stream.color, 640, 480, rs.format.bgr8, 30)
-                w = 640 # must be 640 * 480 ?
-                h = 480
+                # w = 640 # must be 640 * 480 ?
+                # h = 480
+                w = 1920
+                h = 1080
                 config.enable_stream(rs.stream.color, w, h, rs.format.bgr8, 30) #fps is set here
 
                 # staet streaming

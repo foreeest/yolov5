@@ -166,17 +166,17 @@ def fit_rotated_ellipse(data):
     # print('fitting error = %.3f' % (error_sum))
 
     if np.isnan(cx) or np.isnan(cy) or np.isnan(w) or np.isnan(h) or np.isnan(theta):
-        output_file = "bug_log.txt"
-        with open(output_file, "a+") as file:
-            file.write(f"get some NaN in ellipse module\n")
-            file.write(f"{cx} {cy} {w} {h} {theta}\n")
+        # output_file = "bug_log.txt"
+        # with open(output_file, "a+") as file:
+        #     file.write(f"get some NaN in ellipse module\n")
+        #     file.write(f"{cx} {cy} {w} {h} {theta}\n")
         return 0, 0, 0, 0, 0
     
     if w <= 0 or h <= 0 or w < h:
-        output_file = "bug_log.txt"
-        with open(output_file, "a+") as file:
-            file.write(f"invalid w or h in ellipse module\n")
-            file.write(f"{w} {h}\n")
+        # output_file = "bug_log.txt"
+        # with open(output_file, "a+") as file:
+        #     file.write(f"invalid w or h in ellipse module\n")
+        #     file.write(f"{w} {h}\n")
         return 0, 0, 0, 0, 0
 
     return (cx,cy,w,h,theta)
@@ -296,6 +296,7 @@ def run(
     else:
         dataset = LoadImages(source, img_size=imgsz, stride=stride, auto=pt, vid_stride=vid_stride)
     vid_path, vid_writer = [None] * bs, [None] * bs
+    print(f"batch size is {bs}")
 
     # Run inference
     model.warmup(imgsz=(1 if pt or model.triton else bs, 3, *imgsz))  # warmup
@@ -345,6 +346,7 @@ def run(
 
         # Process predictions
         for i, det in enumerate(pred):  # per image； det应该是预测结果  
+            # print(f"i is {i} and pred is {pred}")
             seen += 1
             if webcam:  # batch_size >= 1
                 p, im0, frame = path[i], im0s[i].copy(), dataset.count # im0是原始图像
@@ -397,8 +399,14 @@ def run(
                         # Get ROI
                         x1, y1 = int(xyxy[0].item()), int(xyxy[1].item())
                         x2, y2 = int(xyxy[2].item()), int(xyxy[3].item())
-                        roi = im0[y1:y2, x1:x2]
-                        # roi = im0[min(0,y1*0.9):max(im0.shape[0],y2*1.1), min(0, x1*0.9):max(im0.shape[1],x2*1.1)] # 扩大点，避免切得太紧，但这是错的  
+                        # roi = im0[y1:y2, x1:x2].copy()
+                        # 略扩大，防止yolo的框切得太紧
+                        x1_large = int(max(x1 - (x2 - x1) * 0.1, 0))
+                        x2_large = int(min(x2 + (x2 - x1) * 0.1, im0.shape[1]-1))
+                        y1_large = int(max(y1 - (y2 - y1) * 0.1, 0))
+                        y2_large = int(min(y2 + (y2 - y1) * 0.1, im0.shape[0]-1))
+                        roi = im0[int(y1_large):int(y2_large), int(x1_large):int(x2_large)] # 图像操作必须是整数
+                        cv2.rectangle(im0, (int(x1_large), int(y1_large)), (int(x2_large), int(y2_large)), (0, 255, 0), 1) 
 
                         kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE,(3,3))
                         image_gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
@@ -413,19 +421,19 @@ def run(
                         contours, hierarchy = cv2.findContours(img, cv2.RETR_TREE, cv2.CHAIN_APPROX_NONE)
                         hull = []
 
-                        for i in range(len(contours)):
-                            hull.append(cv2.convexHull(contours[i], False)) 
+                        for idx in range(len(contours)):
+                            hull.append(cv2.convexHull(contours[idx], False)) 
                         for con in hull:
                             approx = cv2.approxPolyDP(con, 0.01 * cv2.arcLength(con,True),True)
                             area = cv2.contourArea(con)
                             if(len(approx) > 10 and area > 1000): 
                                 cx,cy,w,h,theta = fit_rotated_ellipse_ransac(con.reshape(-1,2)) # 从ROI中拿到的信息
 
-                                # 在完整图像的位置  
-                                cx = x1 + cx
-                                cy = y1 + cy
+                                # 转化在完整图像的位置  
+                                cx = x1_large + cx
+                                cy = y1_large + cy
 
-                                # 限制两帧之间预测的图像坐标距离  
+                                # 限制两帧之间预测的图像坐标距离，如果yolo的框很稳这个可以删掉  
                                 if not (cx==0 and cy==0 and w==0 and h==0 and theta==0):
                                     if not FIRST:
                                         FIRST = True
@@ -486,7 +494,7 @@ def run(
                 if dataset.mode == "image":
                     cv2.imwrite(save_path, im0)
                 else:  # 'video' or 'stream'
-                    print(f"i is {i}")
+                    # print(f"i is {i}")
                     if vid_path[i] != save_path:  # new video
                         vid_path[i] = save_path
                         if isinstance(vid_writer[i], cv2.VideoWriter):
