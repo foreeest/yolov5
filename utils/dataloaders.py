@@ -57,6 +57,8 @@ from utils.general import (
 )
 from utils.torch_utils import torch_distributed_zero_first
 
+import pyrealsense2 as rs
+
 # Parameters
 HELP_URL = "See https://docs.ultralytics.com/yolov5/tutorials/train_custom_data"
 IMG_FORMATS = "bmp", "dng", "jpeg", "jpg", "mpo", "png", "tif", "tiff", "webp", "pfm"  # include image suffixes
@@ -433,6 +435,7 @@ class LoadStreams:
         """Initializes a stream loader for processing video streams with YOLOv5, supporting various sources including
         YouTube.
         """
+        # print(f"hi realsense")
         torch.backends.cudnn.benchmark = True  # faster for fixed-size inference
         self.mode = "stream"
         self.img_size = img_size
@@ -455,18 +458,69 @@ class LoadStreams:
             if s == 0:
                 assert not is_colab(), "--source 0 webcam unsupported on Colab. Rerun command in a local environment."
                 assert not is_kaggle(), "--source 0 webcam unsupported on Kaggle. Rerun command in a local environment."
-            cap = cv2.VideoCapture(s)
-            assert cap.isOpened(), f"{st}Failed to open {s}"
-            w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-            h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-            fps = cap.get(cv2.CAP_PROP_FPS)  # warning: may return 0 or nan
-            self.frames[i] = max(int(cap.get(cv2.CAP_PROP_FRAME_COUNT)), 0) or float("inf")  # infinite stream fallback
-            self.fps[i] = max((fps if math.isfinite(fps) else 0) % 100, 0) or 30  # 30 FPS fallback
 
-            _, self.imgs[i] = cap.read()  # guarantee first frame
-            self.threads[i] = Thread(target=self.update, args=([i, cap, s]), daemon=True)
-            LOGGER.info(f"{st} Success ({self.frames[i]} frames {w}x{h} at {self.fps[i]:.2f} FPS)")
-            self.threads[i].start()
+            # realsense version
+            if s == 666:
+                print(f"Hi, this is realsense")
+                # Configure depth and color streams
+                pipeline = rs.pipeline()
+                config = rs.config()
+
+                # Get device product line for setting a supporting resolution
+                pipeline_wrapper = rs.pipeline_wrapper(pipeline)
+                pipeline_profile = config.resolve(pipeline_wrapper)
+                device = pipeline_profile.get_device()
+                device_product_line = str(device.get_info(rs.camera_info.product_line))
+
+                found_rgb = False
+                for ss in device.sensors:
+                    if ss.get_info(rs.camera_info.name) == 'RGB Camera':
+                        found_rgb = True
+                        break
+                if not found_rgb:
+                    print("The demo requires Depth camera with Color sensor")
+                    exit(0)
+
+                # config.enable_stream(rs.stream.depth, 640, 480, rs.format.z16, 30)
+                # config.enable_stream(rs.stream.color, 640, 480, rs.format.bgr8, 30)
+                w = 640 # must be 640 * 480 ?
+                h = 480
+                config.enable_stream(rs.stream.color, w, h, rs.format.bgr8, 30) #fps is set here
+
+                # staet streaming
+                pipeline.start(config)
+
+                # fps & frame is needed
+                # refer to https://github.com/IntelRealSense/librealsense/blob/master/wrappers/python/examples/opencv_viewer_example.py
+                self.frames[i] = float("inf")
+                self.fps[i] = 30
+
+                frames = pipeline.wait_for_frames()
+                color_frame = frames.get_color_frame()
+                frame = np.asanyarray(color_frame.get_data())
+                self.imgs[i] = frame
+
+                self.threads[i] = Thread(target=self.update, args=([i, pipeline, s]), daemon=True) # 读线程
+                LOGGER.info(f"{st} Success ({self.frames[i]} frames {w}x{h} at {self.fps[i]:.2f} FPS)")
+                self.threads[i].start()
+
+            # simple webcam version
+            else:
+                cap = cv2.VideoCapture(s)
+                assert cap.isOpened(), f"{st}Failed to open {s}"
+                w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+                h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+                fps = cap.get(cv2.CAP_PROP_FPS)  # warning: may return 0 or nan
+                self.frames[i] = max(int(cap.get(cv2.CAP_PROP_FRAME_COUNT)), 0) or float("inf")  # infinite stream fallback
+                self.fps[i] = max((fps if math.isfinite(fps) else 0) % 100, 0) or 30  # 30 FPS fallback
+
+                # print(f"self.frames[i] is {self.frames[i]} and self.fps[i] is {self.fps[i]}")
+
+                _, self.imgs[i] = cap.read()  # guarantee first frame
+                self.threads[i] = Thread(target=self.update, args=([i, cap, s]), daemon=True) # 读线程
+                LOGGER.info(f"{st} Success ({self.frames[i]} frames {w}x{h} at {self.fps[i]:.2f} FPS)")
+                self.threads[i].start()
+
         LOGGER.info("")  # newline
 
         # check for common shapes
@@ -477,21 +531,38 @@ class LoadStreams:
         if not self.rect:
             LOGGER.warning("WARNING ⚠️ Stream shapes differ. For optimal performance supply similarly-shaped streams.")
 
-    def update(self, i, cap, stream):
+    def update(self, i, cap, stream): # have a quetion: when s==666, the type of cap is different from else, is this ok?
         """Reads frames from stream `i`, updating imgs array; handles stream reopening on signal loss."""
-        n, f = 0, self.frames[i]  # frame number, frame array
-        while cap.isOpened() and n < f:
-            n += 1
-            cap.grab()  # .read() = .grab() followed by .retrieve()
-            if n % self.vid_stride == 0:
-                success, im = cap.retrieve()
-                if success:
-                    self.imgs[i] = im
-                else:
-                    LOGGER.warning("WARNING ⚠️ Video stream unresponsive, please check your IP camera connection.")
-                    self.imgs[i] = np.zeros_like(self.imgs[i])
-                    cap.open(stream)  # re-open stream if signal was lost
-            time.sleep(0.0)  # wait time
+        if stream == 666:
+            while True:
+                frames = cap.wait_for_frames()
+                # depth_frame = frames.get_depth_frame()
+                color_frame = frames.get_color_frame()
+                if not color_frame:
+                    continue
+                # Convert images to numpy arrays
+                frame = np.asanyarray(color_frame.get_data())
+                color_colormap_dim = frame.shape
+                self.imgs[i] = frame 
+                # print(f"img's shape is{color_colormap_dim}")
+            # finally: # 最后一定会执行
+            #     # Stop streaming
+            #     cap.stop()
+        else:
+            n, f = 0, self.frames[i]  # frame number, frame array
+            while cap.isOpened() and n < f:
+                n += 1
+                cap.grab()  # .read() = .grab() followed by .retrieve()
+                if n % self.vid_stride == 0:
+                    success, im = cap.retrieve() #读，检查是否成功
+                    if success:
+                        self.imgs[i] = im
+                        print(f"im's shape is{im.shape}")
+                    else:
+                        LOGGER.warning("WARNING ⚠️ Video stream unresponsive, please check your IP camera connection.")
+                        self.imgs[i] = np.zeros_like(self.imgs[i])
+                        cap.open(stream)  # re-open stream if signal was lost
+                time.sleep(0.0)  # wait time
 
     def __iter__(self):
         """Resets and returns the iterator for iterating over video frames or images in a dataset."""

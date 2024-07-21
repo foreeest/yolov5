@@ -65,6 +65,8 @@ from utils.general import (
 )
 from utils.torch_utils import select_device, smart_inference_mode
 
+import pyrealsense2 as rs
+
 
 @smart_inference_mode()
 def run(
@@ -161,16 +163,19 @@ def run(
     (save_dir / "labels" if save_txt else save_dir).mkdir(parents=True, exist_ok=True)  # make dir
 
     # Load model
-    device = select_device(device)
+    device = select_device(device) # gpu or cpu
     model = DetectMultiBackend(weights, device=device, dnn=dnn, data=data, fp16=half)
     stride, names, pt = model.stride, model.names, model.pt
     imgsz = check_img_size(imgsz, s=stride)  # check image size
 
+    # pt_test = 0
+    # print(f"what is source now? {source}")
+
     # Dataloader
     bs = 1  # batch_size
-    if webcam:
+    if webcam: # 关注  
         view_img = check_imshow(warn=True)
-        dataset = LoadStreams(source, img_size=imgsz, stride=stride, auto=pt, vid_stride=vid_stride)
+        dataset = LoadStreams(source, img_size=imgsz, stride=stride, auto=pt, vid_stride=vid_stride) # 摄像头图像这里塞进dataset了，这应该是源源不断地塞的吧
         bs = len(dataset)
     elif screenshot:
         dataset = LoadScreenshots(source, img_size=imgsz, stride=stride, auto=pt)
@@ -182,7 +187,7 @@ def run(
     model.warmup(imgsz=(1 if pt or model.triton else bs, 3, *imgsz))  # warmup
     seen, windows, dt = 0, [], (Profile(device=device), Profile(device=device), Profile(device=device))
     for path, im, im0s, vid_cap, s in dataset:
-        with dt[0]:
+        with dt[0]: # 这啥
             im = torch.from_numpy(im).to(model.device)
             im = im.half() if model.fp16 else im.float()  # uint8 to fp16/32
             im /= 255  # 0 - 255 to 0.0 - 1.0
@@ -198,7 +203,7 @@ def run(
                 pred = None
                 for image in ims:
                     if pred is None:
-                        pred = model(image, augment=augment, visualize=visualize).unsqueeze(0)
+                        pred = model(image, augment=augment, visualize=visualize).unsqueeze(0) # 预测
                     else:
                         pred = torch.cat((pred, model(image, augment=augment, visualize=visualize).unsqueeze(0)), dim=0)
                 pred = [pred, None]
@@ -225,10 +230,10 @@ def run(
                 writer.writerow(data)
 
         # Process predictions
-        for i, det in enumerate(pred):  # per image
+        for i, det in enumerate(pred):  # per image； det应该是预测结果  
             seen += 1
             if webcam:  # batch_size >= 1
-                p, im0, frame = path[i], im0s[i].copy(), dataset.count
+                p, im0, frame = path[i], im0s[i].copy(), dataset.count # im0是原始图像
                 s += f"{i}: "
             else:
                 p, im0, frame = path, im0s.copy(), getattr(dataset, "frame", 0)
@@ -238,11 +243,18 @@ def run(
             txt_path = str(save_dir / "labels" / p.stem) + ("" if dataset.mode == "image" else f"_{frame}")  # im.txt
             s += "%gx%g " % im.shape[2:]  # print string
             gn = torch.tensor(im0.shape)[[1, 0, 1, 0]]  # normalization gain whwh
-            imc = im0.copy() if save_crop else im0  # for save_crop
+            imc = im0.copy() if save_crop else im0  # for save_crop 
             annotator = Annotator(im0, line_width=line_thickness, example=str(names))
+
+            # if pt_test < 2:
+            #     print(f"what is det now? {det.shape}")
+            #     print(f"det is {det}")
+            #     pt_test += 1
+
             if len(det):
                 # Rescale boxes from img_size to im0 size
                 det[:, :4] = scale_boxes(im.shape[2:], det[:, :4], im0.shape).round()
+                # print(f"im0 is {im0.shape}")
 
                 # Print results
                 for c in det[:, 5].unique():
@@ -251,6 +263,14 @@ def run(
 
                 # Write results
                 for *xyxy, conf, cls in reversed(det):
+
+                    # # det格式测试  
+                    # if pt_test < 2:
+                    #     print(f"xyxy is {xyxy}")
+                    #     print(f"conf is {conf}")
+                    #     print(f"cls is {cls}")
+                    #     pt_test += 1
+
                     c = int(cls)  # integer class
                     label = names[c] if hide_conf else f"{names[c]}"
                     confidence = float(conf)
@@ -273,7 +293,7 @@ def run(
                         save_one_box(xyxy, imc, file=save_dir / "crops" / names[c] / f"{p.stem}.jpg", BGR=True)
 
             # Stream results
-            im0 = annotator.result()
+            im0 = annotator.result() # 从这里将结果好的导出，成为训练集  
             if view_img:
                 if platform.system() == "Linux" and p not in windows:
                     windows.append(p)
@@ -287,7 +307,9 @@ def run(
                 if dataset.mode == "image":
                     cv2.imwrite(save_path, im0)
                 else:  # 'video' or 'stream'
+                    # print(f"a test0: i is {i}; vid_path[i] is {vid_path[i]}")
                     if vid_path[i] != save_path:  # new video
+                        # print(f"a test1")
                         vid_path[i] = save_path
                         if isinstance(vid_writer[i], cv2.VideoWriter):
                             vid_writer[i].release()  # release previous video writer
@@ -297,6 +319,7 @@ def run(
                             h = int(vid_cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
                         else:  # stream
                             fps, w, h = 30, im0.shape[1], im0.shape[0]
+                            # print(f"a test1: i is {i}")
                         save_path = str(Path(save_path).with_suffix(".mp4"))  # force *.mp4 suffix on results videos
                         vid_writer[i] = cv2.VideoWriter(save_path, cv2.VideoWriter_fourcc(*"mp4v"), fps, (w, h))
                     vid_writer[i].write(im0)

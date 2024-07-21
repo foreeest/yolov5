@@ -65,6 +65,122 @@ from utils.general import (
 )
 from utils.torch_utils import select_device, smart_inference_mode
 
+# for realsense
+import pyrealsense2 as rs
+import numpy as np
+import math
+from realsense_geometry import ellipse_to_limbus
+
+MODE = 0 # 0: just get the pose of eyes; 1: estimate the centre of eyeball
+eyeball_centre = np.array([0, 0, 0]) # 计算出来的眼球中心坐标
+
+# 限制两帧之间预测坐标距离
+THRESHOLD = 30
+FIRST = False
+pre_cx = 0
+pre_cy = 0
+
+
+def update_position(x, y, a, b, THRESHOLD):
+    # 计算两点之间的距离
+    distance = math.sqrt((a - x) ** 2 + (b - y) ** 2)
+    
+    # 如果距离小于阈值，则更新坐标
+    if distance < THRESHOLD:
+        return a, b
+    else:
+        # 计算单位向量
+        unit_vector_x = (a - x) / distance
+        unit_vector_y = (b - y) / distance
+        
+        # 计算新的坐标，保持距离为 THRESHOLD
+        new_x = x + unit_vector_x * THRESHOLD
+        new_y = y + unit_vector_y * THRESHOLD
+        
+        return new_x, new_y
+
+
+# 无效值直接返回5个0
+def fit_rotated_ellipse_ransac(data,iter=50,sample_num=10,offset=80.0):
+
+    count_max = 0
+    effective_sample = None
+
+    for i in range(iter):
+        sample = np.random.choice(len(data), sample_num, replace=False)
+
+        xs = data[sample][:,0].reshape(-1,1)
+        ys = data[sample][:,1].reshape(-1,1)
+        # float -> float32
+        J = np.mat( np.hstack((xs*ys,ys**2,xs, ys, np.ones_like(xs,dtype=np.float32))) )
+        Y = np.mat(-1*xs**2)
+        if np.linalg.det(J.T * J) == 0:
+            return 0, 0, 0, 0, 0
+        P = (J.T * J).I * J.T * Y
+
+        # fitter a*x**2 + b*x*y + c*y**2 + d*x + e*y + f = 0
+        a = 1.0; b= P[0,0]; c= P[1,0]; d = P[2,0]; e= P[3,0]; f=P[4,0];
+        ellipse_model = lambda x,y : a*x**2 + b*x*y + c*y**2 + d*x + e*y + f
+
+        # threshold 
+        ran_sample = np.array([[x,y] for (x,y) in data if np.abs(ellipse_model(x,y)) < offset ])
+
+        if(len(ran_sample) > count_max):
+            count_max = len(ran_sample) 
+            effective_sample = ran_sample
+
+    return fit_rotated_ellipse(effective_sample)
+
+
+def fit_rotated_ellipse(data):
+
+    xs = data[:,0].reshape(-1,1) 
+    ys = data[:,1].reshape(-1,1)
+    # float -> float32
+    J = np.mat( np.hstack((xs*ys,ys**2,xs, ys, np.ones_like(xs,dtype=np.float32))) ) # 雅各比矩阵
+    Y = np.mat(-1*xs**2) # 目标矩阵
+    if np.linalg.det(J.T * J) == 0:
+        return 0, 0, 0, 0, 0
+    P = (J.T * J).I * J.T * Y
+
+    a = 1.0; b= P[0,0]; c= P[1,0]; d = P[2,0]; e= P[3,0]; f=P[4,0]; # 计算椭圆6参数
+    if a != c:
+        theta = 0.5* np.arctan(b/(a-c))  # 保证 a != c
+    else:
+        return 0, 0, 0, 0, 0
+    
+    cx = (2*c*d - b*e)/(b**2-4*a*c)
+    cy = (2*a*e - b*d)/(b**2-4*a*c)
+
+    cu = a*cx**2 + b*cx*cy + c*cy**2 -f
+    w2 = cu/(a*np.cos(theta)**2 + b* np.cos(theta)*np.sin(theta) + c*np.sin(theta)**2)
+    h2 = cu/(a*np.sin(theta)**2 - b* np.cos(theta)*np.sin(theta) + c*np.cos(theta)**2)
+    if w2 <= 0 or h2 <= 0: # 防止开根负数
+        return 0, 0, 0, 0, 0
+    w= np.sqrt(w2)
+    h= np.sqrt(h2)
+
+    ellipse_model = lambda x,y : a*x**2 + b*x*y + c*y**2 + d*x + e*y + f
+
+    error_sum = np.sum([ellipse_model(x,y) for x,y in data])
+    # print('fitting error = %.3f' % (error_sum))
+
+    if np.isnan(cx) or np.isnan(cy) or np.isnan(w) or np.isnan(h) or np.isnan(theta):
+        output_file = "bug_log.txt"
+        with open(output_file, "a+") as file:
+            file.write(f"get some NaN in ellipse module\n")
+            file.write(f"{cx} {cy} {w} {h} {theta}\n")
+        return 0, 0, 0, 0, 0
+    
+    if w <= 0 or h <= 0 or w < h:
+        output_file = "bug_log.txt"
+        with open(output_file, "a+") as file:
+            file.write(f"invalid w or h in ellipse module\n")
+            file.write(f"{w} {h}\n")
+        return 0, 0, 0, 0, 0
+
+    return (cx,cy,w,h,theta)
+
 
 @smart_inference_mode()
 def run(
@@ -161,16 +277,19 @@ def run(
     (save_dir / "labels" if save_txt else save_dir).mkdir(parents=True, exist_ok=True)  # make dir
 
     # Load model
-    device = select_device(device)
+    device = select_device(device) # gpu or cpu
     model = DetectMultiBackend(weights, device=device, dnn=dnn, data=data, fp16=half)
     stride, names, pt = model.stride, model.names, model.pt
     imgsz = check_img_size(imgsz, s=stride)  # check image size
 
+    # pt_test = 0
+    # print(f"what is source now? {source}")
+
     # Dataloader
     bs = 1  # batch_size
-    if webcam:
+    if webcam: # 关注  
         view_img = check_imshow(warn=True)
-        dataset = LoadStreams(source, img_size=imgsz, stride=stride, auto=pt, vid_stride=vid_stride)
+        dataset = LoadStreams(source, img_size=imgsz, stride=stride, auto=pt, vid_stride=vid_stride) # 摄像头图像这里塞进dataset了，这应该是源源不断地塞的吧
         bs = len(dataset)
     elif screenshot:
         dataset = LoadScreenshots(source, img_size=imgsz, stride=stride, auto=pt)
@@ -182,7 +301,7 @@ def run(
     model.warmup(imgsz=(1 if pt or model.triton else bs, 3, *imgsz))  # warmup
     seen, windows, dt = 0, [], (Profile(device=device), Profile(device=device), Profile(device=device))
     for path, im, im0s, vid_cap, s in dataset:
-        with dt[0]:
+        with dt[0]: # 这啥
             im = torch.from_numpy(im).to(model.device)
             im = im.half() if model.fp16 else im.float()  # uint8 to fp16/32
             im /= 255  # 0 - 255 to 0.0 - 1.0
@@ -198,7 +317,7 @@ def run(
                 pred = None
                 for image in ims:
                     if pred is None:
-                        pred = model(image, augment=augment, visualize=visualize).unsqueeze(0)
+                        pred = model(image, augment=augment, visualize=visualize).unsqueeze(0) # 预测
                     else:
                         pred = torch.cat((pred, model(image, augment=augment, visualize=visualize).unsqueeze(0)), dim=0)
                 pred = [pred, None]
@@ -225,10 +344,10 @@ def run(
                 writer.writerow(data)
 
         # Process predictions
-        for i, det in enumerate(pred):  # per image
+        for i, det in enumerate(pred):  # per image； det应该是预测结果  
             seen += 1
             if webcam:  # batch_size >= 1
-                p, im0, frame = path[i], im0s[i].copy(), dataset.count
+                p, im0, frame = path[i], im0s[i].copy(), dataset.count # im0是原始图像
                 s += f"{i}: "
             else:
                 p, im0, frame = path, im0s.copy(), getattr(dataset, "frame", 0)
@@ -238,8 +357,14 @@ def run(
             txt_path = str(save_dir / "labels" / p.stem) + ("" if dataset.mode == "image" else f"_{frame}")  # im.txt
             s += "%gx%g " % im.shape[2:]  # print string
             gn = torch.tensor(im0.shape)[[1, 0, 1, 0]]  # normalization gain whwh
-            imc = im0.copy() if save_crop else im0  # for save_crop
+            imc = im0.copy() if save_crop else im0  # for save_crop 
             annotator = Annotator(im0, line_width=line_thickness, example=str(names))
+
+            # if pt_test < 2:
+            #     print(f"what is det now? {det.shape}")
+            #     print(f"det is {det}")
+            #     pt_test += 1
+
             if len(det):
                 # Rescale boxes from img_size to im0 size
                 det[:, :4] = scale_boxes(im.shape[2:], det[:, :4], im0.shape).round()
@@ -251,10 +376,84 @@ def run(
 
                 # Write results
                 for *xyxy, conf, cls in reversed(det):
+
+                    # # det格式测试  
+                    # if pt_test < 2:
+                        # print(f"xyxy is {xyxy}")
+                        # print(f"conf is {conf}")
+                        # print(f"cls is {cls}")
+                    # pt_test += 1
+
                     c = int(cls)  # integer class
                     label = names[c] if hide_conf else f"{names[c]}"
                     confidence = float(conf)
                     confidence_str = f"{confidence:.2f}"
+
+                    # Ellipse Module: do the ellipse_estimation and pose estimation
+                    global eyeball_centre, MODE
+                    global THRESHOLD, FIRST, pre_cx, pre_cy
+
+                    if conf >= 0.7 and c == 3: # 3.0 is pupil and what we want from the result
+                        # Get ROI
+                        x1, y1 = int(xyxy[0].item()), int(xyxy[1].item())
+                        x2, y2 = int(xyxy[2].item()), int(xyxy[3].item())
+                        roi = im0[y1:y2, x1:x2]
+                        # roi = im0[min(0,y1*0.9):max(im0.shape[0],y2*1.1), min(0, x1*0.9):max(im0.shape[1],x2*1.1)] # 扩大点，避免切得太紧，但这是错的  
+
+                        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE,(3,3))
+                        image_gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
+                        blur = cv2.GaussianBlur(image_gray,(3,3),0)
+                        ret,thresh1 = cv2.threshold(blur,50,255,cv2.THRESH_BINARY)
+                        opening = cv2.morphologyEx(thresh1, cv2.MORPH_OPEN, kernel)
+                        closing = cv2.morphologyEx(opening, cv2.MORPH_CLOSE, kernel)
+
+                        img = 255 - closing
+                        # because of version
+                        # _,contours, hierarchy = cv2.findContours(image, cv2.RETR_TREE, cv2.CHAIN_APPROX_NONE)
+                        contours, hierarchy = cv2.findContours(img, cv2.RETR_TREE, cv2.CHAIN_APPROX_NONE)
+                        hull = []
+
+                        for i in range(len(contours)):
+                            hull.append(cv2.convexHull(contours[i], False)) 
+                        for con in hull:
+                            approx = cv2.approxPolyDP(con, 0.01 * cv2.arcLength(con,True),True)
+                            area = cv2.contourArea(con)
+                            if(len(approx) > 10 and area > 1000): 
+                                cx,cy,w,h,theta = fit_rotated_ellipse_ransac(con.reshape(-1,2)) # 从ROI中拿到的信息
+
+                                # 在完整图像的位置  
+                                cx = x1 + cx
+                                cy = y1 + cy
+
+                                # 限制两帧之间预测的图像坐标距离  
+                                if not (cx==0 and cy==0 and w==0 and h==0 and theta==0):
+                                    if not FIRST:
+                                        FIRST = True
+                                        pre_cx = cx
+                                        pre_cy = cy
+                                    else:
+                                        cx, cy = update_position(pre_cx, pre_cy, cx, cy, THRESHOLD)
+                                        pre_cx, pre_cy = cx, cy
+
+                                
+                                if MODE == 0:
+                                    limbus, flag = ellipse_to_limbus(cx, cy, w*2, h*2, theta, True, MODE)
+                                    if flag:
+                                        postion = limbus[0]
+                                        direction = limbus[1]
+                                        print(f"predicted postion is {postion}")
+                                        print(f"predicted direction is {direction}")
+                                elif MODE == 1: # in this mode, arm don't move and wait until points is enough
+                                    limbus, flag = ellipse_to_limbus(cx, cy, w*2, h*2, theta, True, MODE)
+                                    if flag:
+                                        eyeball_centre = limbus[0]
+                                        MODE = 0 # go back to detect mode
+                                        print(f"get eyeball centre: {eyeball_centre}")
+
+                                cv2.ellipse(im0,(int(cx),int(cy)),(int(w),int(h)),theta*180.0/np.pi,0.0,360.0,(0,255,0),1)
+                                cv2.drawMarker(im0, (int(cx),int(cy)),(0, 0, 255),cv2.MARKER_CROSS,2,1)
+
+                                break         
 
                     if save_csv:
                         write_to_csv(p.name, label, confidence_str)
@@ -273,7 +472,7 @@ def run(
                         save_one_box(xyxy, imc, file=save_dir / "crops" / names[c] / f"{p.stem}.jpg", BGR=True)
 
             # Stream results
-            im0 = annotator.result()
+            im0 = annotator.result() 
             if view_img:
                 if platform.system() == "Linux" and p not in windows:
                     windows.append(p)
@@ -287,6 +486,7 @@ def run(
                 if dataset.mode == "image":
                     cv2.imwrite(save_path, im0)
                 else:  # 'video' or 'stream'
+                    print(f"i is {i}")
                     if vid_path[i] != save_path:  # new video
                         vid_path[i] = save_path
                         if isinstance(vid_writer[i], cv2.VideoWriter):

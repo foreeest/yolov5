@@ -273,7 +273,7 @@ def run(
                         save_one_box(xyxy, imc, file=save_dir / "crops" / names[c] / f"{p.stem}.jpg", BGR=True)
 
             # Stream results
-            im0 = annotator.result()
+            im0 = annotator.result() # 从这里将结果好的导出，成为训练集  
             if view_img:
                 if platform.system() == "Linux" and p not in windows:
                     windows.append(p)
