@@ -75,7 +75,7 @@ MODE = 0 # 0: just get the pose of eyes; 1: estimate the centre of eyeball
 eyeball_centre = np.array([0, 0, 0]) # 计算出来的眼球中心坐标
 
 # 限制两帧之间预测坐标距离
-THRESHOLD = 30
+THRESHOLD = 3000
 FIRST = False
 pre_cx = 0
 pre_cy = 0
@@ -401,10 +401,10 @@ def run(
                         x2, y2 = int(xyxy[2].item()), int(xyxy[3].item())
                         # roi = im0[y1:y2, x1:x2].copy()
                         # 略扩大，防止yolo的框切得太紧
-                        x1_large = int(max(x1 - (x2 - x1) * 0.1, 0))
-                        x2_large = int(min(x2 + (x2 - x1) * 0.1, im0.shape[1]-1))
-                        y1_large = int(max(y1 - (y2 - y1) * 0.1, 0))
-                        y2_large = int(min(y2 + (y2 - y1) * 0.1, im0.shape[0]-1))
+                        x1_large = int(max(x1 - (x2 - x1) * 0.3, 0))
+                        x2_large = int(min(x2 + (x2 - x1) * 0.3, im0.shape[1]-1))
+                        y1_large = int(max(y1 - (y2 - y1) * 0.3, 0))
+                        y2_large = int(min(y2 + (y2 - y1) * 0.3, im0.shape[0]-1))
                         roi = im0[int(y1_large):int(y2_large), int(x1_large):int(x2_large)] # 图像操作必须是整数
                         cv2.rectangle(im0, (int(x1_large), int(y1_large)), (int(x2_large), int(y2_large)), (0, 255, 0), 1) 
 
@@ -458,7 +458,7 @@ def run(
                                         MODE = 0 # go back to detect mode
                                         print(f"get eyeball centre: {eyeball_centre}")
 
-                                cv2.ellipse(im0,(int(cx),int(cy)),(int(w),int(h)),theta*180.0/np.pi,0.0,360.0,(0,255,0),1)
+                                cv2.ellipse(im0,(int(cx),int(cy)),(int(w),int(h)),theta*180.0/np.pi,0.0,360.0,(0,255,255),2)
                                 cv2.drawMarker(im0, (int(cx),int(cy)),(0, 0, 255),cv2.MARKER_CROSS,2,1)
 
                                 break         
