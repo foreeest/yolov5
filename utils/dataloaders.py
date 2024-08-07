@@ -483,10 +483,10 @@ class LoadStreams:
 
                 # config.enable_stream(rs.stream.depth, 640, 480, rs.format.z16, 30)
                 # config.enable_stream(rs.stream.color, 640, 480, rs.format.bgr8, 30)
-                w = 640 # must be 640 * 480 ?
-                h = 480
-                # w = 1920
-                # h = 1080
+                # w = 640 # must be 640 * 480 ?
+                # h = 480
+                w = 1920
+                h = 1080
                 config.enable_stream(rs.stream.color, w, h, rs.format.bgr8, 30) #fps is set here
 
                 # staet streaming
@@ -584,9 +584,11 @@ class LoadStreams:
         if self.transforms:
             im = np.stack([self.transforms(x) for x in im0])  # transforms
         else:
+            # print(f"im0 is {len(im0)}")
             im = np.stack([letterbox(x, self.img_size, stride=self.stride, auto=self.auto)[0] for x in im0])  # resize
             im = im[..., ::-1].transpose((0, 3, 1, 2))  # BGR to RGB, BHWC to BCHW
             im = np.ascontiguousarray(im)  # contiguous
+            # print(f"im is {im.shape}  {im.dtype}") # (1 3 384 640) uint8
 
         return self.sources, im, im0, None, ""
 

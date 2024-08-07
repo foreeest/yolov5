@@ -395,16 +395,16 @@ def run(
                     global eyeball_centre, MODE
                     global THRESHOLD, FIRST, pre_cx, pre_cy
 
-                    if conf >= 0.7 and c == 3: # 3.0 is pupil and what we want from the result
+                    if conf >= 0.7 and c == 0: # 0 is pupil and what we want from the result
                         # Get ROI
                         x1, y1 = int(xyxy[0].item()), int(xyxy[1].item())
                         x2, y2 = int(xyxy[2].item()), int(xyxy[3].item())
                         # roi = im0[y1:y2, x1:x2].copy()
                         # 略扩大，防止yolo的框切得太紧
-                        x1_large = int(max(x1 - (x2 - x1) * 0.3, 0))
-                        x2_large = int(min(x2 + (x2 - x1) * 0.3, im0.shape[1]-1))
-                        y1_large = int(max(y1 - (y2 - y1) * 0.3, 0))
-                        y2_large = int(min(y2 + (y2 - y1) * 0.3, im0.shape[0]-1))
+                        x1_large = int(max(x1 - (x2 - x1) * 0.1, 0))
+                        x2_large = int(min(x2 + (x2 - x1) * 0.1, im0.shape[1]-1))
+                        y1_large = int(max(y1 - (y2 - y1) * 0.1, 0))
+                        y2_large = int(min(y2 + (y2 - y1) * 0.1, im0.shape[0]-1))
                         roi = im0[int(y1_large):int(y2_large), int(x1_large):int(x2_large)] # 图像操作必须是整数
                         cv2.rectangle(im0, (int(x1_large), int(y1_large)), (int(x2_large), int(y2_large)), (0, 255, 0), 1) 
 
@@ -426,7 +426,7 @@ def run(
                         for con in hull:
                             approx = cv2.approxPolyDP(con, 0.01 * cv2.arcLength(con,True),True)
                             area = cv2.contourArea(con)
-                            if(len(approx) > 10 and area > 1000): 
+                            if(len(approx) > 10 and area > 500):  # modify
                                 cx,cy,w,h,theta = fit_rotated_ellipse_ransac(con.reshape(-1,2)) # 从ROI中拿到的信息
 
                                 # 转化在完整图像的位置  
