@@ -85,6 +85,19 @@ FIRST = False
 pre_cx = 0
 pre_cy = 0
 
+from realsense_geometry_debug import Direction
+# relative position of Eye and Iris, according to Image
+# from enum import Enum
+# class Direction(Enum):
+#     UpLeft = 1
+#     UpRight = 2
+#     DownRight = 3
+#     DownLeft = 4
+
+image_height = 1080
+image_width = 1920
+file_counter = 0
+
 @smart_inference_mode()
 def run(
     weights=ROOT / "yolov5s.pt",  # model path or triton URL
@@ -190,9 +203,6 @@ def run(
     imgsz = check_img_size(imgsz, s=stride)  # check image size
     # print(f"imgsz2 is {imgsz}") here is 640 x 640
 
-    # pt_test = 0
-    # print(f"what is source now? {source}")
-
     # Dataloader
     bs = 1  # batch_size
     if webcam: # 关注;need in ros  
@@ -204,20 +214,22 @@ def run(
     else:
         dataset = LoadImages(source, img_size=imgsz, stride=stride, auto=pt, vid_stride=vid_stride)
     vid_path, vid_writer = [None] * bs, [None] * bs
-    # print(f"batch size is {bs}")
 
     # Run inference
     model.warmup(imgsz=(1 if pt or model.triton else bs, 3, *imgsz))  # warmup
     seen, windows, dt = 0, [], (Profile(device=device), Profile(device=device), Profile(device=device))
     for path, im, im0s, vid_cap, s in dataset:
         # print(f"ims is {len(im0s)}")
+        # import time
+        # start_time = time.time()  # 记录开始时间
+
         with dt[0]: # 这啥
             im = torch.from_numpy(im).to(model.device)
             im = im.half() if model.fp16 else im.float()  # uint8 to fp16/32
             im /= 255  # 0 - 255 to 0.0 - 1.0
             if len(im.shape) == 3:
                 im = im[None]  # expand for batch dim
-                print(f"what this?") # not printed
+                # print(f"what this?") # not printed if webcam, but print if video   
             if model.xml and im.shape[0] > 1:
                 ims = torch.chunk(im, im.shape[0], 0)
                 print(f"what this 2?")
@@ -241,25 +253,9 @@ def run(
         with dt[2]:
             pred = non_max_suppression(pred, conf_thres, iou_thres, classes, agnostic_nms, max_det=max_det)
 
-        # Second-stage classifier (optional)
-        # pred = utils.general.apply_classifier(pred, classifier_model, im, im0s)
-
-        # Define the path for the CSV file
-        csv_path = save_dir / "predictions.csv"
-
-        # Create or append to the CSV file
-        def write_to_csv(image_name, prediction, confidence):
-            """Writes prediction data for an image to a CSV file, appending if the file exists."""
-            data = {"Image Name": image_name, "Prediction": prediction, "Confidence": confidence}
-            with open(csv_path, mode="a", newline="") as f:
-                writer = csv.DictWriter(f, fieldnames=data.keys())
-                if not csv_path.is_file():
-                    writer.writeheader()
-                writer.writerow(data)
-
         # Process predictions
         for i, det in enumerate(pred):  # per image； det应该是预测结果  ;pred 可以在with里定义？  
-            # print(f"i is {i} and pred is {pred}")
+            # print(f"i is {i}")
             seen += 1
             if webcam:  # batch_size >= 1
                 p, im0, frame = path[i], im0s[i].copy(), dataset.count # im0是原始图像,frame是总帧数计数器，i在realsense只有0
@@ -270,18 +266,10 @@ def run(
 
             p = Path(p)  # to Path
             save_path = str(save_dir / p.name)  # im.jpg
-            txt_path = str(save_dir / "labels" / p.stem) + ("" if dataset.mode == "image" else f"_{frame}")  # im.txt
             s += "%gx%g " % im.shape[2:]  # print string
-            gn = torch.tensor(im0.shape)[[1, 0, 1, 0]]  # normalization gain whwh
-            imc = im0.copy() if save_crop else im0  # for save_crop 
             annotator = Annotator(im0, line_width=line_thickness, example=str(names))
 
-            # if pt_test < 2:
-            #     print(f"what is det now? {det.shape}")
-            #     print(f"det is {det}")
-            #     pt_test += 1
-
-            if len(det):
+            if len(det) == 2: # Assume that only 1 Eye and 1 Iris
                 # Rescale boxes from img_size to im0 size
                 det[:, :4] = scale_boxes(im.shape[2:], det[:, :4], im0.shape).round()
 
@@ -289,63 +277,177 @@ def run(
                 for c in det[:, 5].unique():
                     n = (det[:, 5] == c).sum()  # detections per class
                     s += f"{n} {names[int(c)]}{'s' * (n > 1)}, "  # add to string
+                
+                # Ellipse Module: do the ellipse_estimation and pose estimation
+                global eyeball_centre, MODE
+                global THRESHOLD, FIRST, pre_cx, pre_cy
 
+                global image_width, image_height
+                # Iris
+                x1, y1, x2, y2 = 0, 0, image_width - 1, image_height - 1
+                # Eye
+                m1, n1, m2, n2 = 0, 0, image_width - 1, image_height - 1
+
+                have_iris, have_eye = False, False
                 # Write results
                 for *xyxy, conf, cls in reversed(det):
-
-                    # # det格式测试  
-                    # if pt_test < 2:
-                        # print(f"xyxy is {xyxy}")
-                        # print(f"conf is {conf}")
-                        # print(f"cls is {cls}")
-                    # pt_test += 1
 
                     c = int(cls)  # integer class
                     label = names[c] if hide_conf else f"{names[c]}"
                     confidence = float(conf)
                     confidence_str = f"{confidence:.2f}"
 
-                    # Ellipse Module: do the ellipse_estimation and pose estimation
-                    global eyeball_centre, MODE
-                    global THRESHOLD, FIRST, pre_cx, pre_cy
-
-                    if conf >= 0.7 and c == 0: # 0 is pupil and what we want from the result
-                        # Get ROI
+                    if conf >= 0.7 and c == 1: # 1 is Iris and what we want from the result
+                        # Get Iris ROI
                         x1, y1 = int(xyxy[0].item()), int(xyxy[1].item())
                         x2, y2 = int(xyxy[2].item()), int(xyxy[3].item())
-                        # roi = im0[y1:y2, x1:x2].copy()
-                        # 略扩大，防止yolo的框切得太紧
-                        x1_large = int(max(x1 - (x2 - x1) * 0.1, 0))
-                        x2_large = int(min(x2 + (x2 - x1) * 0.1, im0.shape[1]-1))
-                        y1_large = int(max(y1 - (y2 - y1) * 0.1, 0))
-                        y2_large = int(min(y2 + (y2 - y1) * 0.1, im0.shape[0]-1))
-                        roi = im0[int(y1_large):int(y2_large), int(x1_large):int(x2_large)] # 图像操作必须是整数
-                        cv2.rectangle(im0, (int(x1_large), int(y1_large)), (int(x2_large), int(y2_large)), (0, 255, 0), 1) 
+                        have_iris = True
+                    elif conf >= 0.7 and c == 0: # 0 is Eye and what we want from the result
+                        # Get Eye ROI
+                        m1, n1 = int(xyxy[0].item()), int(xyxy[1].item())
+                        m2, n2 = int(xyxy[2].item()), int(xyxy[3].item())
+                        have_eye = True
 
-                        geometry.set_bias(x1_large, y1_large)
-                        limbus, flag = geometry.vision_func(roi, MODE)
-                        if flag:
-                            postion = limbus[0]
-                            direction = limbus[1] 
-                            print(f"predicted postion is {postion}")
-                            print(f"predicted direction is {direction}")
+                if (not have_iris) or (not have_eye):
+                    break        
 
-                    if save_csv:
-                        write_to_csv(p.name, label, confidence_str)
+                # 略扩大，防止yolo的框切得太紧
+                x1_large = int(max(x1 - (x2 - x1) * 0.1, 0))
+                x2_large = int(min(x2 + (x2 - x1) * 0.1, im0.shape[1]-1))
+                y1_large = int(max(y1 - (y2 - y1) * 0.1, 0))
+                y2_large = int(min(y2 + (y2 - y1) * 0.1, im0.shape[0]-1))
+                roi = im0[int(y1_large):int(y2_large), int(x1_large):int(x2_large)] # 图像操作必须是整数
+                # cv2.rectangle(im0, (int(x1_large), int(y1_large)), (int(x2_large), int(y2_large)), (0, 255, 0), 1) 
+                adaptiveThres = int(np.mean(roi))
+                
+                # relative position of Eye and Iris, according to Image
+                direction = Direction.UpLeft
+                eyeX, eyeY = (m1 + m2) // 2, (n1 + n2) // 2
+                irisX, irisY = (x1 + x2) // 2, (y1 + y2) // 2
+                if irisX > eyeX and irisY <= eyeY:
+                    direction = Direction.UpRight
+                elif irisX > eyeX and irisY > eyeY:
+                    direction = Direction.DownRight
+                elif irisX <= eyeX and irisY > eyeY:
+                    direction = Direction.DownLeft    
 
-                    if save_txt:  # Write to file
-                        xywh = (xyxy2xywh(torch.tensor(xyxy).view(1, 4)) / gn).view(-1).tolist()  # normalized xywh
-                        line = (cls, *xywh, conf) if save_conf else (cls, *xywh)  # label format
-                        with open(f"{txt_path}.txt", "a") as f:
-                            f.write(("%g " * len(line)).rstrip() % line + "\n")
+                geometry.set_bias(x1_large, y1_large)
+                ## add policy
+                limbus, flag, temp_res = geometry.vision_func(roi, adaptiveThres, direction, 2, MODE)
+                if flag:
+                    post = limbus[0]
+                    dire = limbus[1] 
+                    print(f"predicted postion is {post}")
+                    print(f"predicted direction is {dire}")
 
+                    ## 画ground truth的
+                    # global file_counter
+                    # file_counter += 1
+                    # if file_counter % 10 == 4:
+                    #     directory_path = '/home/robot/developEye/center_position/ground_truth/0829_1'
+                    #     if not os.path.exists(directory_path):
+                    #         os.makedirs(directory_path)
+                    #         print(f"Directory {directory_path} created.")
+
+                    #     text_file_path = os.path.join(directory_path, 'result.txt')
+                    #     with open(text_file_path, 'a+') as text_file:
+                    #         text_content = f"{temp_res[0]} {temp_res[1]}\n"
+                    #         text_file.write(text_content)
+
+                    #     imgtmp = im0.copy()
+                    #     target_image_filename = "image_{:04d}.jpg"
+                    #     target_image_path = os.path.join(directory_path, target_image_filename.format(file_counter // 10 + 1))
+                    #     cv2.imwrite(target_image_path,imgtmp)
+
+                    # gaze vector from yolo
+                    im_gv_yolo_show = im0.copy()
+                    length_times = 2
+                    start_point_line = (eyeX, eyeY)  
+                    end_point_line = (irisX, irisY)  
+                    cv2.line(im_gv_yolo_show, start_point_line, end_point_line, color=(0, 255, 0), thickness=1)
+                    start_point_vector_yolo = (irisX, irisY)
+                    end_point_vector_x, end_point_vector_y = int((1+length_times)*irisX-length_times*eyeX), int((1+length_times)*irisY-length_times*eyeY)
+                    end_point_vector_yolo = (end_point_vector_x, end_point_vector_y)
+                        # in the picture
+                    if not (end_point_vector_x < 0 or end_point_vector_x > im0.shape[1] - 1 or end_point_vector_y < 0 or end_point_vector_y > im0.shape[0] - 1):
+                        cv2.arrowedLine(im_gv_yolo_show, start_point_vector_yolo, end_point_vector_yolo, color=(255, 0, 255), thickness=3, line_type=8, tipLength=0.2)  
+                    im_gv_yolo_show = cv2.resize(im_gv_yolo_show, (im0.shape[1] // 3, im0.shape[0] // 3), interpolation=cv2.INTER_AREA) 
+                    cv2.imshow('gv-yolo', im_gv_yolo_show) 
+
+                    # gaze vector from ellipse
+                    im_gv_ellipse_show = im0.copy()
+                    length_scaler = 80
+                    print(f"yolo{irisX} {irisY}; ellipse{temp_res[0]} {temp_res[1]}")
+                    start_point_vector_ellipse = (int(temp_res[0]), int(temp_res[1]))
+                    end_point_vector_x, end_point_vector_y = int(temp_res[0] + length_scaler * dire[0]), int(temp_res[1] + length_scaler * dire[1])
+                    end_point_vector_ellipse = (end_point_vector_x, end_point_vector_y)
+                        # in the picture
+                    if not (end_point_vector_x < 0 or end_point_vector_x > im0.shape[1] - 1 or end_point_vector_y < 0 or end_point_vector_y > im0.shape[0] - 1):
+                        cv2.arrowedLine(im_gv_ellipse_show, start_point_vector_ellipse, end_point_vector_ellipse, color=(255, 0, 255), thickness=3, line_type=8, tipLength=0.2)  
+                    im_gv_ellipse_show = cv2.resize(im_gv_ellipse_show, (im0.shape[1] // 3, im0.shape[0] // 3), interpolation=cv2.INTER_AREA) 
+                    cv2.imshow('gv-ellipse', im_gv_ellipse_show) 
+ 
+                ## 画二义性未解决的图，4表示不管
+                limbus2, flag2, temp_res2 = geometry.vision_func(roi, adaptiveThres, direction, 4, MODE)
+
+                im_gv_ellipse_show1 = im0.copy()
+                length_scaler = 160
+                start_point_vector_ellipse = (int(temp_res[0]), int(temp_res[1]))
+                end_point_vector_x, end_point_vector_y = int(temp_res[0] + length_scaler * limbus[1][0]), int(temp_res[1] + length_scaler * limbus[1][1])
+                end_point_vector_ellipse = (end_point_vector_x, end_point_vector_y)
+                    # in the picture
+                cv2.ellipse(im_gv_ellipse_show1,(int(temp_res[0]),int(temp_res[1])),(int(temp_res[2]),int(temp_res[3])),temp_res[4],0.0,360.0,(0,255,0),2)
+                if not (end_point_vector_x < 0 or end_point_vector_x > im0.shape[1] - 1 or end_point_vector_y < 0 or end_point_vector_y > im0.shape[0] - 1):
+                    cv2.arrowedLine(im_gv_ellipse_show1, start_point_vector_ellipse, end_point_vector_ellipse, color=(255, 0, 255), thickness=3, line_type=8, tipLength=0.2)  
+                # im_gv_ellipse_show1 = cv2.resize(im_gv_ellipse_show1, (im0.shape[1] // 3, im0.shape[0] // 3), interpolation=cv2.INTER_AREA) 
+                cv2.imshow('no_2_meaning', im_gv_ellipse_show1)
+                im_gv_ellipse_show2 = im0.copy()
+                length_scaler = 160
+                start_point_vector_ellipse = (int(temp_res[0]), int(temp_res[1]))
+                end_point_vector_x, end_point_vector_y = int(temp_res2[0] + length_scaler * limbus2[1][0]), int(temp_res2[1] + length_scaler * limbus2[1][1])
+                end_point_vector_ellipse = (end_point_vector_x, end_point_vector_y)
+                    # in the picture
+                cv2.ellipse(im_gv_ellipse_show2,(int(temp_res[0]),int(temp_res[1])),(int(temp_res[2]),int(temp_res[3])),temp_res[4],0.0,360.0,(0,255,0),2)
+                if not (end_point_vector_x < 0 or end_point_vector_x > im0.shape[1] - 1 or end_point_vector_y < 0 or end_point_vector_y > im0.shape[0] - 1):
+                    cv2.arrowedLine(im_gv_ellipse_show2, start_point_vector_ellipse, end_point_vector_ellipse, color=(255, 0, 255), thickness=3, line_type=8, tipLength=0.2)  
+                # im_gv_ellipse_show2 = cv2.resize(im_gv_ellipse_show2, (im0.shape[1] // 3, im0.shape[0] // 3), interpolation=cv2.INTER_AREA) 
+                cv2.imshow('with_2_meaning', im_gv_ellipse_show2)
+
+                key = cv2.waitKey(1)
+                if key == ord('s'): 
+                    cv2.imwrite('no_2_meaning.jpg', im_gv_ellipse_show1) 
+                    cv2.imwrite('with_2_meaning.jpg', im_gv_ellipse_show2)
+                    print("Image saved")
+                ## end 画二义性的图
+
+                    # output -> to check
+                    # global file_counter
+                    # file_counter += 1
+                    # tmp = file_counter
+                    # directory_path = '/home/robot/developEye/center_position/satistic/0825_4'
+                    # if not os.path.exists(directory_path):
+                    #     os.makedirs(directory_path)
+                    #     print(f"Directory {directory_path} created.")
+                    # # target_image_filename = "image_{:04d}.jpg"
+                    # # target_image_path = os.path.join(directory_path, target_image_filename.format(tmp + 1))
+                    # # cv2.imwrite(target_image_path,im0)
+
+                    # text_file_path = os.path.join(directory_path, 'xywha-xyz-abc.txt')
+                    # with open(text_file_path, 'a+') as text_file:
+                    #     text_content = f"{temp_res[0]} {temp_res[1]} {temp_res[2]} {temp_res[3]} {temp_res[4]} {post[0]} {post[1]} {post[2]} {dire[0]} {dire[1]} {dire[2]}\n"
+                    #     text_file.write(text_content)
+                # 画图
+                cv2.ellipse(im0,(int(temp_res[0]),int(temp_res[1])),(int(temp_res[2]),int(temp_res[3])),temp_res[4],0.0,360.0,(0,255,0),1)
+                cv2.drawMarker(frame, (int(temp_res[0]),int(temp_res[1])),(0, 0, 255),cv2.MARKER_CROSS,2,1)
+
+                for *xyxy, conf, cls in reversed(det):
                     if save_img or save_crop or view_img:  # Add bbox to image
-                        print(f"{save_img} {save_crop} {view_img}")
+                        # print(f"{save_img} {save_crop} {view_img}")
                         c = int(cls)  # integer class
                         label = None if hide_labels else (names[c] if hide_conf else f"{names[c]} {conf:.2f}")
                         annotator.box_label(xyxy, label, color=colors(c, True))
-                    if save_crop:
-                        save_one_box(xyxy, imc, file=save_dir / "crops" / names[c] / f"{p.stem}.jpg", BGR=True)
+
+                cv2.rectangle(im0, (int(x1_large), int(y1_large)), (int(x2_large), int(y2_large)), (0, 255, 0), 1) 
 
             # Stream results
             im0 = annotator.result() 
@@ -355,6 +457,7 @@ def run(
                     windows.append(p)
                     cv2.namedWindow(str(p), cv2.WINDOW_NORMAL | cv2.WINDOW_KEEPRATIO)  # allow window resize (Linux)
                     cv2.resizeWindow(str(p), im0.shape[1], im0.shape[0])
+
                 cv2.imshow(str(p), im0)
                 cv2.waitKey(1)  # 1 millisecond
 
@@ -380,6 +483,8 @@ def run(
 
         # Print time (inference-only)
         LOGGER.info(f"{s}{'' if len(det) else '(no detections), '}{dt[1].dt * 1E3:.1f}ms")
+        # end_time = time.time()  # 记录结束时间
+        # print(f"代码执行时间：{end_time - start_time}秒")
 
     # Print results
     t = tuple(x.t / seen * 1e3 for x in dt)  # speeds per image

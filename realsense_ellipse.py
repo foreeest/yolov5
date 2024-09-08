@@ -395,7 +395,7 @@ def run(
                     global eyeball_centre, MODE
                     global THRESHOLD, FIRST, pre_cx, pre_cy
 
-                    if conf >= 0.7 and c == 0: # 0 is pupil and what we want from the result
+                    if conf >= 0.7 and c == 1: # 0 is pupil and what we want from the result
                         # Get ROI
                         x1, y1 = int(xyxy[0].item()), int(xyxy[1].item())
                         x2, y2 = int(xyxy[2].item()), int(xyxy[3].item())

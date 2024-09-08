@@ -3,11 +3,12 @@
 import cv2  
 import numpy as np  
 import math
+import os
   
 # 需要标定, realsense L515 RGB 1080 * 1920，这跟直接获取还差些  
 LIMBUS_R_MM = 6.3  
 # 默认内参  
-FOCAL_LEN_X_PX = 1352.7  # 4 param in slam book
+FOCAL_LEN_X_PX = 1352.7  # 4 param in slam bois_expected
 FOCAL_LEN_Y_PX = 1360.6  
 FOCAL_LEN_Z_PX = (FOCAL_LEN_X_PX + FOCAL_LEN_Y_PX) / 2  
 PRIN_POINT = np.array([979.5840, 552.1356], dtype=np.float64)  
@@ -32,6 +33,14 @@ def set_intrinsic(img_w, img_h):
         FOCAL_LEN_Z_PX = (FOCAL_LEN_X_PX + FOCAL_LEN_Y_PX) / 2  
         PRIN_POINT = np.array([979.5840, 552.1356], dtype=np.float64) 
 
+# relative position of Eye and Iris, according to Image
+from enum import Enum
+class Direction(Enum):
+    UpLeft = 1
+    UpRight = 2
+    DownRight = 3
+    DownLeft = 4
+
 
 # for filtering the estimated pos
 NFILTER = 1 # a batch -> how many point used to estimate one point
@@ -45,7 +54,7 @@ cposBuf = []
 cdirBuf = []
 ccounter = 0
   
-def ellipse_to_limbus(x, y, w, h, angle, limbus_switch=True, mode=0):  
+def ellipse_to_limbus(x, y, w, h, angle, direction, policy, mode=0):  
     """
     caculate 3d pose
     :param x: x-position
@@ -73,9 +82,9 @@ def ellipse_to_limbus(x, y, w, h, angle, limbus_switch=True, mode=0):
         #     file.write(f"{w} {h}\n")
         return [], False
     
-    # 转换到毫米空间  
+    # 转换到毫米空间，正负值由坐标系决定    
     iris_z_mm = (LIMBUS_R_MM * 2 * FOCAL_LEN_Z_PX) / w  
-    iris_x_mm = -iris_z_mm * (x - PRIN_POINT[0]) / FOCAL_LEN_X_PX  
+    iris_x_mm = iris_z_mm * (x - PRIN_POINT[0]) / FOCAL_LEN_X_PX  
     iris_y_mm = iris_z_mm * (y - PRIN_POINT[1]) / FOCAL_LEN_Y_PX  
 
     # print(f"1{x} {y}")
@@ -89,39 +98,94 @@ def ellipse_to_limbus(x, y, w, h, angle, limbus_switch=True, mode=0):
     # if h / w > 1:
     #     print(f"h is {h} and w is {w}")
     tht = math.acos(h / w)   # y-axis rotation (radians)  
-
-    if limbus_switch:  # 什么时候true
-        tht = -tht  # ambiguous acos, so sometimes switch limbus  
+    # ambiguous is acos, so sometimes switch limbus  
 
     # 计算limbus normal  
-    limb_normal = np.array([  
-        math.sin(tht) * math.cos(psi),  
-        -math.sin(tht) * math.sin(psi),  
-        -math.cos(tht)  
-    ])  
+    limb_normal = np.array([
+        np.sin(tht) * np.cos(psi),
+        np.sin(tht) * np.sin(psi),
+        -np.cos(tht)
+    ])
+
+    solve_ellipse_policy = policy
+    # 根据设定坐标轴正负来设定此处正负
+    if solve_ellipse_policy == 1:
+        # policy1: only if yolo and ellipse is consitent
+        is_expected = False
+        if direction == Direction.UpLeft:
+            # print(f"normal is {limb_normal[0]} {limb_normal[1]}")
+            if limb_normal[0] <= 0 and limb_normal[1] <= 0:
+                is_expected = True
+            elif limb_normal[0] >= 0 and limb_normal[1] >= 0:
+                is_expected = True
+                limb_normal[0] *= -1
+                limb_normal[1] *= -1
+        elif direction == Direction.UpRight:
+            if limb_normal[0] > 0 and limb_normal[1] <= 0:
+                is_expected = True
+            elif limb_normal[0] < 0 and limb_normal[1] >= 0:
+                is_expected = True
+                limb_normal[0] *= -1
+                limb_normal[1] *= -1
+        elif direction == Direction.DownLeft:
+            if limb_normal[0] <= 0 and limb_normal[1] > 0:
+                is_expected = True
+            elif limb_normal[0] >= 0 and limb_normal[1] < 0:
+                is_expected = True
+                limb_normal[0] *= -1
+                limb_normal[1] *= -1
+        elif direction == Direction.DownRight:
+            if limb_normal[0] > 0 and limb_normal[1] > 0:
+                is_expected = True
+            elif limb_normal[0] < 0 and limb_normal[1] < 0:
+                is_expected = True
+                limb_normal[0] *= -1
+                limb_normal[1] *= -1
+        if not is_expected:
+            print(f"Not expected state: ellipse is inconsitent with yolo")
+    elif solve_ellipse_policy == 2:
+        # policy2: purely listen to yolo
+        if direction == Direction.UpLeft:
+            # print(f"normal is {limb_normal[0]} {limb_normal[1]}")
+            if limb_normal[0] > 0:
+                limb_normal *= -1
+            if limb_normal[1] > 0:
+                limb_normal[1] *= -1
+        elif direction == Direction.UpRight:
+            if limb_normal[0] < 0:
+                limb_normal *= -1
+            if limb_normal[1] > 0:
+                limb_normal[1] *= -1
+        elif direction == Direction.DownLeft:
+            if limb_normal[0] > 0:
+                limb_normal *= -1
+            if limb_normal[1] < 0:
+                limb_normal[1] *= -1
+        elif direction == Direction.DownRight:
+            if limb_normal[0] < 0:
+                limb_normal *= -1
+            if limb_normal[1] < 0:
+                limb_normal[1] *= -1
+        print(f"direction is {direction}")
+    elif solve_ellipse_policy == 3:
+        # policy3: when over the threshold, trust yolo
+        print(f"not support yet")
+
+    # print(f"yolo:{direction}")
+    # print(f"ellipse:{limb_normal}")
 
     # 校正弱透视  
-    x_correction = math.atan2(-iris_y_mm, iris_z_mm)  
-    y_correction = math.atan2(iris_x_mm, iris_z_mm)  
+    x_correction = -np.arctan2(iris_y_mm, iris_z_mm)
+    y_correction = np.arctan2(iris_x_mm, iris_z_mm)
   
-
-    # 创建旋转矩阵（使用Rodrigues公式，但这里直接构建）  
-    Ry = np.array([  
-        [math.cos(y_correction), 0, math.sin(y_correction)],  
-        [0, 1, 0],  
-        [-math.sin(y_correction), 0, math.cos(y_correction)]  
-    ])  
-
-    Rx = np.array([  
-        [1, 0, 0],  
-        [0, math.cos(x_correction), -math.sin(x_correction)],  
-        [0, math.sin(x_correction), math.cos(x_correction)]  
-    ])  
-
-    # 应用旋转  
-    limb_normal = np.dot(Ry, limb_normal)  
-    limb_normal = np.dot(Rx, limb_normal)  
-
+    # Define rotation matrices
+    Ry = np.array([[np.cos(y_correction), 0, np.sin(y_correction)],
+                [0, 1, 0],
+                [-np.sin(y_correction), 0, np.cos(y_correction)]])
+    Rx = np.array([[1, 0, 0],
+                   [0, np.cos(x_correction), -np.sin(x_correction)],
+                   [0, np.sin(x_correction), np.cos(x_correction)]])
+    # limb_normal = np.dot(-Rx, np.dot(-Ry, limb_normal))
 
     if mode == 0:
         # 滤波算法：取中位数
@@ -283,10 +347,10 @@ def fit_rotated_ellipse(data):
     # print('fitting error = %.3f' % (error_sum))
 
     if np.isnan(cx) or np.isnan(cy) or np.isnan(w) or np.isnan(h) or np.isnan(theta):
-        output_file = "bug_log.txt"
-        with open(output_file, "a+") as file:
-            file.write(f"get some NaN in ellipse module\n")
-            file.write(f"{cx} {cy} {w} {h} {theta}\n")
+        # output_file = "bug_log.txt"
+        # with open(output_file, "a+") as file:
+        #     file.write(f"get some NaN in ellipse module\n")
+        #     file.write(f"{cx} {cy} {w} {h} {theta}\n")
         return 0, 0, 0, 0, 0
 
     return (cx,cy,w,h,theta)
@@ -323,7 +387,7 @@ def set_bias(x, y):
     x_bias = x
     y_bias = y
 
-def vision_func(frame, mode=0):
+def vision_func(frame, adaptiveThres, direction, policy, mode=0):
     '''
     接受一帧图像，返回一个预测pose；以及在屏幕上显示识别结果
     pose具体来说是 limbus, flag
@@ -333,17 +397,22 @@ def vision_func(frame, mode=0):
     '''
 
     global THRESHOLD, FIRST, pre_cx, pre_cy # 维护预测坐标
+    global x_bias, y_bias
     # 返回值
     limbus = []
     flag = False
+    temp_res = []
 
     kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE,(3,3))
     image_gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
     blur = cv2.GaussianBlur(image_gray,(3,3),0)
-    ret,thresh1 = cv2.threshold(blur,50,255,cv2.THRESH_BINARY)
+
+    if adaptiveThres > 50:
+        adaptiveThres = 50
+
+    ret,thresh1 = cv2.threshold(blur,adaptiveThres,255,cv2.THRESH_BINARY)
     opening = cv2.morphologyEx(thresh1, cv2.MORPH_OPEN, kernel)
     closing = cv2.morphologyEx(opening, cv2.MORPH_CLOSE, kernel)
-
     image = 255 - closing
     # because of version
     # _,contours, hierarchy = cv2.findContours(image, cv2.RETR_TREE, cv2.CHAIN_APPROX_NONE)
@@ -360,6 +429,16 @@ def vision_func(frame, mode=0):
         area = cv2.contourArea(con)
         if(len(approx) > 10 and area > 250): 
             cx,cy,w,h,theta = fit_rotated_ellipse_ransac(con.reshape(-1,2))
+
+            # directory_path = '/home/robot/developEye/center_position/yolo_ellipse'
+            # if not os.path.exists(directory_path):
+            #     os.makedirs(directory_path)
+            #     print(f"Directory {directory_path} created.")
+
+            # text_file_path = os.path.join(directory_path, 'result.txt')
+            # with open(text_file_path, 'a+') as text_file:
+            #     text_content = f"{cx+x_bias} {cy+y_bias}\n"
+            #     text_file.write(text_content)
 
             # 限制两帧之间预测的图像坐标距离  
             if not (cx==0 and cy==0 and w==0 and h==0 and theta==0):
@@ -380,19 +459,17 @@ def vision_func(frame, mode=0):
                     maj_a = 2 * h
                     min_a = 2 * w
                     not_sure = theta + 0.5 * np.pi
-                limbus, flag = ellipse_to_limbus(cx + x_bias, cy + y_bias, maj_a, min_a, not_sure, True, mode)
+                # maj 和 min 对应长轴、短轴，角度对应接近图像x轴的夹角，[-45, +45]
+                limbus, flag = ellipse_to_limbus(cx + x_bias, cy + y_bias, maj_a, min_a, not_sure * 180/np.pi, direction, policy, mode)
+                temp_res = np.array([int(cx + x_bias), int(cy + y_bias), int(w), int(h), theta*180.0/np.pi, maj_a, min_a, not_sure], dtype=np.float64)
 
             elif mode == 1: # in this mode, arm don't move and wait until points is enough
-                limbus, flag = ellipse_to_limbus(cx + x_bias, cy + y_bias, w*2, h*2, theta, True, mode)
+                # this is wrong, please change to correct one
+                limbus, flag = ellipse_to_limbus(cx + x_bias, cy + y_bias, w*2, h*2, theta, direction, policy, mode)
                 if flag:
                     eyeball_centre = limbus[0]
                     mode = 0 # go back to detect mode
                     print(f"get eyeball centre: {eyeball_centre}")
 
-            # NOTE：你可以在此获得椭圆的信息，中心cx cy; 两轴w h；偏转角theta  
-            cv2.ellipse(frame,(int(cx),int(cy)),(int(w),int(h)),theta*180.0/np.pi,0.0,360.0,(0,255,0),1)
-            cv2.drawMarker(frame, (int(cx),int(cy)),(0, 0, 255),cv2.MARKER_CROSS,2,1)
-            # TODO 输出眼球几何中心，和注视线，需要将三维坐标投影回二维平面，但这个感觉有点难
-
             break # only one eye
-    return limbus,flag
+    return limbus,flag,temp_res
